@@ -1,0 +1,40 @@
+name: "Build and push images"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Build:
+      runs-on: ubuntu-latest
+      name: "Build and Push Sing-box Image"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        CONTAINER_REGISTRY: ghcr.io
+        CONTAINER_REPOSITORY: ${{ github.repository }}
+        IMAGE_NAME: sing-box
+
+      steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3.0.0
+        with:
+          registry: ${{ env.CONTAINER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ env.GITHUB_TOKEN }}
+
+      - name: Build and Push Images to GitHub Container Registry
+        uses: docker/build-push-action@v5.1.0
+        with:
+          push: true
+          platforms: linux/amd64, linux/arm64, linux/arm/v7
+          tags: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
