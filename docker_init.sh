@@ -53,10 +53,10 @@ install() {
 
   # 生成 sing-box 配置文件
   if [[ "$SERVER_IP" =~ : ]]; then
-    local WARP_ENDPOINT=2606:4700:d0::a29f:c101
+    local WARP_ENDPOINT=2606:4700:d0::a29f:c001
     local DOMAIN_STRATEG=prefer_ipv6
   else
-    local WARP_ENDPOINT=162.159.193.10
+    local WARP_ENDPOINT=162.159.192.1
     local DOMAIN_STRATEG=prefer_ipv4
   fi
 
@@ -113,9 +113,9 @@ EOF
               "server_port":2408,
               "local_address":[
                   "172.16.0.2/32",
-                  "2606:4700:110:8a36:df92:102a:9602:fa18/128"
+                  "2606:4700:110:8b5b:f091:78ca:e4:ddc0/128"
               ],
-              "private_key":"YFYOAdbw1bKTHlNNi+aEjBM3BO7unuFC5rOkMRAz9XY=",
+              "private_key":"+CuFrguWB+SpWxjFY1I1pj7HxpsQUHNQrXUqTftVEUM=",
               "peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
               "reserved":[
                   78,
@@ -367,8 +367,8 @@ EOF
   }
 EOF
 
-  # 生成 Trojan 配置
-  [ "${TROJAN}" = 'true' ] && ((PORT++)) && PORT_TROJAN=$PORT && cat > $WORK_DIR/conf/16_trojan_inbounds.json << EOF
+  # 生成 Trojan + ws + tls 配置
+  [ "${TROJAN_WS}" = 'true' ] && ((PORT++)) && PORT_TROJAN_WS=$PORT && cat > $WORK_DIR/conf/16_trojan_inbounds.json << EOF
   {
       "inbounds":[
           {
@@ -377,16 +377,17 @@ EOF
               "sniff_override_destination":true,
               "tag":"${NODE_NAME} trojan",
               "listen":"::",
-              "listen_port":${PORT_TROJAN},
+              "listen_port":${PORT_TROJAN_WS},
               "users":[
                   {
                       "password":"${UUID}"
                   }
               ],
-              "tls":{
-                  "enabled":true,
-                  "certificate_path":"$WORK_DIR/cert/cert.pem",
-                  "key_path":"$WORK_DIR/cert/private.key"
+              "transport":{
+                  "type":"ws",
+                  "path":"/ws-trojan",
+                  "max_early_data":2048,
+                  "early_data_header_name":"Sec-WebSocket-Protocol"
               },
               "multiplex":{
                   "enabled":true,
@@ -424,7 +425,7 @@ EOF
               ],
               "transport":{
                   "type":"ws",
-                  "path":"/${UUID}-vmess",
+                  "path":"/ws-vmess",
                   "max_early_data":2048,
                   "early_data_header_name":"Sec-WebSocket-Protocol"
               },
@@ -464,7 +465,7 @@ EOF
               ],
               "transport":{
                   "type":"ws",
-                  "path":"/${UUID}-vless",
+                  "path":"/ws-vless",
                   "max_early_data":2048,
                   "early_data_header_name":"Sec-WebSocket-Protocol"
               },
@@ -702,9 +703,25 @@ stdout_logfile=/dev/null
       ssl_stapling               off;
       ssl_stapling_verify        off;"
 
-  [ "${VMESS_WS}" = 'true' ] && NGINX_CONF+="
+  [ "${TROJAN_WS}" = 'true' ] && NGINX_CONF+="
+      # 反代 sing-box trojan websocket
+      location /ws-trojan {
+        if (\$http_upgrade != "websocket") {
+           return 404;
+        }
+        proxy_pass                          http://127.0.0.1:${PORT_TROJAN_WS};
+        proxy_http_version                  1.1;
+        proxy_set_header Upgrade            \$http_upgrade;
+        proxy_set_header Connection         "upgrade";
+        proxy_set_header X-Real-IP          \$remote_addr;
+        proxy_set_header X-Forwarded-For    \$proxy_add_x_forwarded_for;
+        proxy_set_header Host               \$host;
+        proxy_redirect                      off;
+      }"
+
+  [ "${VLESS_WS}" = 'true' ] && NGINX_CONF+="
       # 反代 sing-box vless websocket
-      location /${UUID}-vless {
+      location /ws-vless {
         if (\$http_upgrade != "websocket") {
            return 404;
         }
@@ -718,9 +735,9 @@ stdout_logfile=/dev/null
         proxy_redirect                      off;
       }"
 
-  [ "${VLESS_WS}" = 'true' ] && NGINX_CONF+="
+  [ "${VMESS_WS}" = 'true' ] && NGINX_CONF+="
       # 反代 sing-box websocket
-      location /${UUID}-vmess {
+      location /ws-vmess {
         if (\$http_upgrade != "websocket") {
            return 404;
         }
@@ -785,15 +802,15 @@ stdout_logfile=/dev/null
   local CLASH_SUBSCRIBE+="
   $CLASH_SHADOWSOCKS
 "
-  [ "${TROJAN}" = 'true' ] && local CLASH_TROJAN="- {name: \"${NODE_NAME} trojan\", type: trojan, server: ${SERVER_IP}, port: $PORT_TROJAN, password: ${UUID}, client-fingerprint: random, skip-cert-verify: true, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
+  [ "${TROJAN_WS}" = 'true' ] && local CLASH_TROJAN_WS="- {name: \"${NODE_NAME} trojan-ws-tls\", type: trojan, server: ${CDN}, port: 443, password: ${UUID}, udp: true, tls: true, sni: ${ARGO_DOMAIN}, skip-cert-verify: false, network: ws, ws-opts: { path: \"/ws-trojan\", headers: { Host: ${ARGO_DOMAIN}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
   local CLASH_SUBSCRIBE+="
-  $CLASH_TROJAN
+  $CLASH_TROJAN_WS
 "
-  [ "${VMESS_WS}" = 'true' ] && local CLASH_VMESS_WS="- {name: \"${NODE_NAME} vmess-ws\", type: vmess, server: ${CDN}, port: 80, uuid: ${UUID}, udp: true, tls: false, alterId: 0, cipher: none, skip-cert-verify: true, network: ws, ws-opts: { path: \"/${UUID}-vmess\", headers: {Host: ${ARGO_DOMAIN}} }, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
+  [ "${VMESS_WS}" = 'true' ] && local CLASH_VMESS_WS="- {name: \"${NODE_NAME} vmess-ws\", type: vmess, server: ${CDN}, port: 80, uuid: ${UUID}, udp: true, tls: false, alterId: 0, cipher: none, skip-cert-verify: true, network: ws, ws-opts: { path: \"/ws-vmess\", headers: {Host: ${ARGO_DOMAIN}} }, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
   local CLASH_SUBSCRIBE+="
   $CLASH_VMESS_WS
 "
-  [ "${VLESS_WS}" = 'true' ] && local CLASH_VLESS_WS="- {name: \"${NODE_NAME} vless-ws-tls\", type: vless, server: ${CDN}, port: 443, uuid: ${UUID}, udp: true, tls: true, servername: ${ARGO_DOMAIN}, network: ws, skip-cert-verify: true, ws-opts: { path: \"/${UUID}-vless\", headers: {Host: ${ARGO_DOMAIN}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol }, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
+  [ "${VLESS_WS}" = 'true' ] && local CLASH_VLESS_WS="- {name: \"${NODE_NAME} vless-ws-tls\", type: vless, server: ${CDN}, port: 443, uuid: ${UUID}, udp: true, tls: true, servername: ${ARGO_DOMAIN}, network: ws, skip-cert-verify: true, ws-opts: { path: \"/ws-vless\", headers: {Host: ${ARGO_DOMAIN}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol }, smux: { enabled: true, protocol: 'h2mux', padding: true, max-connections: '8', min-streams: '16', statistic: true, only-tcp: false } }" &&
   local CLASH_SUBSCRIBE+="
   $CLASH_VLESS_WS
 "
@@ -826,16 +843,16 @@ ss://$(echo -n "2022-blake3-aes-128-gcm:${SHADOWTLS_PASSWORD}@${SERVER_IP_2}:${P
   [ "${SHADOWSOCKS}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
 ss://$(echo -n "aes-128-gcm:${UUID}@${SERVER_IP_2}:$PORT_SHADOWSOCKS" | base64 -w0)#${NODE_NAME}%20shadowsocks
 "
-  [ "${TROJAN}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
-trojan://${UUID}@${SERVER_IP_1}:$PORT_TROJAN?allowInsecure=1#${NODE_NAME}%20trojan
+  [ "${TROJAN_WS}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
+trojan://${UUID}@${CDN}:443?peer=${ARGO_DOMAIN}&mux=1&plugin=obfs-local;obfs=websocket;obfs-host=${ARGO_DOMAIN};obfs-uri=/ws-trojan?ed=2048#${NODE_NAME}%20trojan-ws-tls
 "
   [ "${VMESS_WS}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
 ----------------------------
-vmess://$(echo -n "none:${UUID}@${CDN}:80" | base64 -w0)?remarks=${NODE_NAME}%20vmess-ws&obfsParam=${ARGO_DOMAIN}&path=/${UUID}-vmess&obfs=websocket&alterId=0
+vmess://$(echo -n "none:${UUID}@${CDN}:80" | base64 -w0)?remarks=${NODE_NAME}%20vmess-ws&obfsParam=${ARGO_DOMAIN}&path=/ws-vmess&obfs=websocket&alterId=0
 "
   [ "${VLESS_WS}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
 ----------------------------
-vless://$(echo -n "auto:${UUID}@${CDN}:443" | base64 -w0)?remarks=${NODE_NAME} vless-ws-tls&obfsParam=${ARGO_DOMAIN}&path=/${UUID}-vless?ed=2048&obfs=websocket&tls=1&peer=${ARGO_DOMAIN}&allowInsecure=1
+vless://$(echo -n "auto:${UUID}@${CDN}:443" | base64 -w0)?remarks=${NODE_NAME} vless-ws-tls&obfsParam=${ARGO_DOMAIN}&path=/ws-vless?ed=2048&obfs=websocket&tls=1&peer=${ARGO_DOMAIN}&allowInsecure=1
 "
   [ "${H2_REALITY}" = 'true' ] && local SHADOWROCKET_SUBSCRIBE+="
 ----------------------------
@@ -919,20 +936,19 @@ tuic://${UUID}:${UUID}@${SERVER_IP_1}:${PORT_TUIC}?alpn=h3&congestion_control=bb
 ----------------------------
 ss://$(echo -n "aes-128-gcm:${UUID}@${SERVER_IP_1}:$PORT_SHADOWSOCKS" | base64 -w0)#${NODE_NAME// /%20}%20shadowsocks"
 
-  [ "${TROJAN}" = 'true' ] && local V2RAYN_SUBSCRIBE+="
+  [ "${TROJAN_WS}" = 'true' ] && local V2RAYN_SUBSCRIBE+="
 ----------------------------
-trojan://${UUID}@${SERVER_IP_1}:$PORT_TROJAN?security=tls&type=tcp&headerType=none#${NODE_NAME// /%20}%20trojan
-
+trojan://${UUID}@${CDN}:443?security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=%2Fws-trojan%3Fed%3D2048#${NODE_NAME// /%20}%20trojan-ws-tls
 # $(info "ShadowTLS 配置文件内容，需要更新 sing_box 内核")"
 
   [ "${VMESS_WS}" = 'true' ] && local V2RAYN_SUBSCRIBE+="
 ----------------------------
-vmess://$(echo -n "{ \"v\": \"2\", \"ps\": \"${NODE_NAME} vmess-ws\", \"add\": \"${CDN}\", \"port\": \"80\", \"id\": \"${UUID}\", \"aid\": \"0\", \"scy\": \"none\", \"net\": \"ws\", \"type\": \"none\", \"host\": \"${ARGO_DOMAIN}\", \"path\": \"/${UUID}-vmess\", \"tls\": \"\", \"sni\": \"\", \"alpn\": \"\" }" | base64 -w0)
+vmess://$(echo -n "{ \"v\": \"2\", \"ps\": \"${NODE_NAME} vmess-ws\", \"add\": \"${CDN}\", \"port\": \"80\", \"id\": \"${UUID}\", \"aid\": \"0\", \"scy\": \"none\", \"net\": \"ws\", \"type\": \"none\", \"host\": \"${ARGO_DOMAIN}\", \"path\": \"/ws-vmess\", \"tls\": \"\", \"sni\": \"\", \"alpn\": \"\" }" | base64 -w0)
 "
 
   [ "${VLESS_WS}" = 'true' ] && local V2RAYN_SUBSCRIBE+="
 ----------------------------
-vless://${UUID}@${CDN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=%2F${UUID}-vless%3Fed%3D2048#${NODE_NAME// /%20}%20vless-ws-tls
+vless://${UUID}@${CDN}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=%2Fws-vless%3Fed%3D2048#${NODE_NAME// /%20}%20vless-ws-tls
 "
 
   [ "${H2_REALITY}" = 'true' ] && local V2RAYN_SUBSCRIBE+="
@@ -968,18 +984,18 @@ nekoray://shadowsocks#$(echo -n "{\"_v\":0,\"method\":\"2022-blake3-aes-128-gcm\
 ----------------------------
 ss://$(echo -n "aes-128-gcm:${UUID}" | base64 -w0)@${SERVER_IP_1}:$PORT_SHADOWSOCKS#${NODE_NAME} shadowsocks"
 
-  [ "${TROJAN}" = 'true' ] && local NEKOBOX_SUBSCRIBE+="
+  [ "${TROJAN_WS}" = 'true' ] && local NEKOBOX_SUBSCRIBE+="
 ----------------------------
-trojan://${UUID}@${SERVER_IP_1}:$PORT_TROJAN?security=tls&allowInsecure=1&fp=random&type=tcp#${NODE_NAME} trojan"
+trojan://${UUID}@${CDN}:443?security=tls&sni=${ARGO_DOMAIN}&type=ws&host=${ARGO_DOMAIN}&path=%2Fws-trojan%3Fed%3D2048#${NODE_NAME} trojan-ws-tls"
 
   [ "${VMESS_WS}" = 'true' ] && local NEKOBOX_SUBSCRIBE+="
 ----------------------------
-vmess://$(echo -n "{\"add\":\"${CDN}\",\"aid\":\"0\",\"host\":\"${ARGO_DOMAIN}\",\"id\":\"${UUID}\",\"net\":\"ws\",\"path\":\"/${UUID}-vmess\",\"port\":\"80\",\"ps\":\"${NODE_NAME} vmess-ws\",\"scy\":\"none\",\"sni\":\"\",\"tls\":\"\",\"type\":\"\",\"v\":\"2\"}" | base64 -w0)
+vmess://$(echo -n "{\"add\":\"${CDN}\",\"aid\":\"0\",\"host\":\"${ARGO_DOMAIN}\",\"id\":\"${UUID}\",\"net\":\"ws\",\"path\":\"/ws-vmess\",\"port\":\"80\",\"ps\":\"${NODE_NAME} vmess-ws\",\"scy\":\"none\",\"sni\":\"\",\"tls\":\"\",\"type\":\"\",\"v\":\"2\"}" | base64 -w0)
 "
 
   [ "${VLESS_WS}" = 'true' ] && local NEKOBOX_SUBSCRIBE+="
 ----------------------------
-vless://${UUID}@${CDN}:443?security=tls&sni=${ARGO_DOMAIN}&type=ws&path=/${UUID}-vless?ed%3D2048&host=${ARGO_DOMAIN}&encryption=none#${NODE_NAME}%20vless-ws-tls
+vless://${UUID}@${CDN}:443?security=tls&sni=${ARGO_DOMAIN}&type=ws&path=/ws-vless?ed%3D2048&host=${ARGO_DOMAIN}&encryption=none#${NODE_NAME}%20vless-ws-tls
 "
 
   [ "${H2_REALITY}" = 'true' ] && local NEKOBOX_SUBSCRIBE+="
@@ -1013,15 +1029,15 @@ vless://${UUID}@${SERVER_IP_1}:${PORT_GRPC_REALITY}?security=reality&sni=addons.
   local INBOUND_REPLACE+=" { \"type\": \"shadowsocks\", \"tag\": \"${NODE_NAME} shadowsocks\", \"server\": \"${SERVER_IP}\", \"server_port\": $PORT_SHADOWSOCKS, \"method\": \"aes-128-gcm\", \"password\": \"${UUID}\", \"multiplex\": { \"enabled\": true, \"protocol\": \"h2mux\", \"max_connections\": 8, \"min_streams\": 16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," &&
   local NODE_REPLACE+="\"${NODE_NAME} shadowsocks\","
 
-  [ "${TROJAN}" = 'true' ] &&
-  local INBOUND_REPLACE+=" { \"type\": \"trojan\", \"tag\": \"${NODE_NAME} trojan\", \"server\": \"${SERVER_IP}\", \"server_port\": $PORT_TROJAN, \"password\": \"${UUID}\", \"tls\": { \"enabled\":true, \"insecure\": true, \"server_name\":\"\", \"utls\": { \"enabled\":true, \"fingerprint\":\"chrome\" } }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_connections\": 8, \"min_streams\": 16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," &&
-  local NODE_REPLACE+="\"${NODE_NAME} trojan\","
+  [ "${TROJAN_WS}" = 'true' ] &&
+  local INBOUND_REPLACE+=" { \"type\":\"trojan\", \"tag\":\"${NODE_NAME} trojan-ws-tls\", \"server\": \"${CDN}\", \"server_port\": 443, \"password\": \"${UUID}\", \"tls\": { \"enabled\":true, \"server_name\":\"${ARGO_DOMAIN}\", \"utls\": { \"enabled\":true, \"fingerprint\":\"chrome\" } }, \"transport\": { \"type\":\"ws\", \"path\":\"/ws-trojan\", \"headers\": { \"Host\": \"${ARGO_DOMAIN}\" }, \"max_early_data\":2408, \"early_data_header_name\":\"Sec-WebSocket-Protocol\" }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_connections\": 16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," &&
+  local NODE_REPLACE+="\"${NODE_NAME} trojan-ws-tls\","
 
   [ "${VMESS_WS}" = 'true' ] &&
-  local INBOUND_REPLACE+=" { \"type\": \"vmess\", \"tag\": \"${NODE_NAME} vmess-ws\", \"server\":\"${CDN}\", \"server_port\":80, \"uuid\":\"${UUID}\", \"transport\": { \"type\":\"ws\", \"path\":\"/${UUID}-vmess\", \"headers\": { \"Host\": \"${ARGO_DOMAIN}\" } }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_streams\":16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," && local NODE_REPLACE+="\"${NODE_NAME} vmess-ws\","
+  local INBOUND_REPLACE+=" { \"type\": \"vmess\", \"tag\": \"${NODE_NAME} vmess-ws\", \"server\":\"${CDN}\", \"server_port\":80, \"uuid\":\"${UUID}\", \"transport\": { \"type\":\"ws\", \"path\":\"/ws-vmess\", \"headers\": { \"Host\": \"${ARGO_DOMAIN}\" } }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_streams\":16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," && local NODE_REPLACE+="\"${NODE_NAME} vmess-ws\","
 
   [ "${VLESS_WS}" = 'true' ] &&
-  local INBOUND_REPLACE+=" { \"type\": \"vless\", \"tag\": \"${NODE_NAME} vless-ws-tls\", \"server\":\"${CDN}\", \"server_port\":443, \"uuid\":\"${UUID}\", \"tls\": { \"enabled\":true, \"server_name\":\"${ARGO_DOMAIN}\", \"utls\": { \"enabled\":true, \"fingerprint\":\"chrome\" } }, \"transport\": { \"type\":\"ws\", \"path\":\"/${UUID}-vless\", \"headers\": { \"Host\": \"${ARGO_DOMAIN}\" }, \"max_early_data\":2048, \"early_data_header_name\":\"Sec-WebSocket-Protocol\" }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_streams\":16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," &&
+  local INBOUND_REPLACE+=" { \"type\": \"vless\", \"tag\": \"${NODE_NAME} vless-ws-tls\", \"server\":\"${CDN}\", \"server_port\":443, \"uuid\":\"${UUID}\", \"tls\": { \"enabled\":true, \"server_name\":\"${ARGO_DOMAIN}\", \"utls\": { \"enabled\":true, \"fingerprint\":\"chrome\" } }, \"transport\": { \"type\":\"ws\", \"path\":\"/ws-vless\", \"headers\": { \"Host\": \"${ARGO_DOMAIN}\" }, \"max_early_data\":2048, \"early_data_header_name\":\"Sec-WebSocket-Protocol\" }, \"multiplex\": { \"enabled\":true, \"protocol\":\"h2mux\", \"max_streams\":16, \"padding\": true, \"brutal\":{ \"enabled\":true, \"up_mbps\":1000, \"down_mbps\":1000 } } }," &&
   local NODE_REPLACE+="\"${NODE_NAME} vless-ws-tls\","
 
   [ "${H2_REALITY}" = 'true' ] &&
