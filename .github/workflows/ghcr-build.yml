@@ -11,7 +11,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         CONTAINER_REGISTRY: ghcr.io
         CONTAINER_REPOSITORY: ${{ github.repository }}
-        IMAGE_NAME: sing-box
 
       steps:
       - name: Checkout code
@@ -37,4 +36,4 @@ jobs:
         with:
           push: true
           platforms: linux/amd64, linux/arm64, linux/arm/v7
-          tags: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_REPOSITORY }}:latest
